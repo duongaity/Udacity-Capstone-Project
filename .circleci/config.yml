@@ -110,14 +110,14 @@ jobs:
           cluster-name: udacity-cluster-${CIRCLE_WORKFLOW_ID:0:7}
           aws-region: ${AWS_DEFAULT_REGION}
       - aws-eks/update-kubeconfig-with-authenticator:
+          install-kubectl: true
           aws-region: ${AWS_DEFAULT_REGION}
           cluster-name: udacity-cluster-${CIRCLE_WORKFLOW_ID:0:7}
-          install-kubectl: true
       - kubernetes/create-or-update-resource:
-          resource-file-path: deployments/deployment.yaml
-          resource-name: deployment/nginx-deployment
           get-rollout-status: true
           show-kubectl-command: true
+          resource-file-path: deployments/deployment.yaml
+          resource-name: deployment/nginx-deployment
       - kubernetes/create-or-update-resource:
           resource-file-path: "deployments/deployment.yml"
       - slack/notify:
