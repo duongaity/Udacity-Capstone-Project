@@ -1,0 +1,178 @@
+version: 2.1
+
+orbs:
+  kubernetes: circleci/kubernetes@1.3.0
+  aws-eks: circleci/aws-eks@2.2.0
+  aws-ecr: circleci/aws-ecr@8.1.2
+  slack: circleci/slack@4.9.3
+
+jobs:
+  build-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Build front-end
+          command: |
+            cd frontend
+            npm install
+            npm run build
+      - save_cache:
+          paths: [frontend/node_modules]
+          key: frontend-build
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+  
+  lint-test-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Frontend Lint Test
+          command: |
+            cd frontend
+            npm install
+            npm run lint
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+  unit-test-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Frontend Unit test
+          command: |
+            cd frontend
+            npm install
+            npm run test
+      - slack/notify:
+          event: fail
+          template: basic_fail_1      
+
+  scan-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Scan frontend dependencies
+          command: |
+            cd frontend
+            npm audit --audit-level=critical --force
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+  
+  push-to-dockerhub:
+    docker:
+      - image: cimg/node:16.13.2
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.14
+      - run:
+          name: Build Docker Image
+          command: |
+            docker build --tag=$DOCKER_IMAGE_NAME .
+      - run:
+          name: Push Docker Image to DockerHub
+          command: |
+            echo "Docker DOCKER_USERNAME: $DOCKER_USERNAME"
+            echo "Docker DOCKER_IMAGE: $DOCKER_IMAGE_NAME"
+            docker login -u="$DOCKER_USERNAME" -p="$DOCKER_PASSWORD"
+            docker tag $DOCKER_IMAGE_NAME $DOCKER_USERNAME/$DOCKER_IMAGE_NAME
+            docker push $DOCKER_USERNAME/$DOCKER_IMAGE_NAME
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+   
+  configure-infrastructure:
+    docker:
+      - image: cimg/node:16.13.2
+    steps:
+      - checkout
+      - aws-eks/create-cluster:
+          cluster-name: udacity-cluster-${CIRCLE_WORKFLOW_ID:0:7}
+          aws-region: ${AWS_DEFAULT_REGION}
+      - aws-eks/update-kubeconfig-with-authenticator:
+          aws-region: ${AWS_DEFAULT_REGION}
+          cluster-name: udacity-cluster-${CIRCLE_WORKFLOW_ID:0:7}
+          install-kubectl: true
+      - kubernetes/create-or-update-resource:
+          resource-file-path: deployments/deployment.yaml
+          resource-name: deployment/nginx-deployment
+          get-rollout-status: true
+          show-kubectl-command: true
+      - kubernetes/create-or-update-resource:
+          resource-file-path: "deployments/deployment.yml"
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+  
+  deploy-application:
+    docker:
+      - image: cimg/python:3.10
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - aws-eks/update-kubeconfig-with-authenticator:
+          cluster-name: deployments/deployment.yaml
+          aws-region: ${AWS_DEFAULT_REGION}
+          install-kubectl: true
+      - run:
+          name: Run kubectl
+          command: |
+            kubectl get pods
+            kubectl get services
+      - slack/notify:
+          event: pass
+          template: basic_success_1
+
+workflows:
+  default:
+    jobs:
+      - build-frontend
+      - lint-test-frontend:
+          requires: [build-frontend]
+      - unit-test-frontend:
+          requires: [build-frontend]
+      - scan-frontend:
+          requires: [lint-test-frontend, unit-test-frontend]
+      - push-to-dockerhub:
+          name: build-and-push-image-to-dockerhub
+          requires: [scan-frontend]
+          filters:
+            branches:
+              only: [master]
+      - aws-ecr/build-and-push-image:
+          name: build-and-push-image-to-ecr
+          registry-id: AWS_ECR_REGISTRY_ID
+          region: ${AWS_DEFAULT_REGION}
+          repo: udacity_capstone
+          tag: v1
+          requires: [scan-frontend]
+          filters:
+            branches:
+              only: [master]
+      - configure-infrastructure:
+          requires: [build-and-push-image-to-dockerhub, build-and-push-image-to-ecr]
+          filters:
+            branches:
+              only: [master]
+      - deploy-application:
+          requires: [configure-infrastructure]
